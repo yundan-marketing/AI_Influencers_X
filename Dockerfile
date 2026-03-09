@@ -1,12 +1,12 @@
 # Stage 1: 构建阶段
-# 使用 Node.js 镜像作为构建环境
-FROM node:20-alpine AS builder
+# 使用 Node.js 镜像作为构建环境（Debian 基础，兼容性更好）
+FROM node:20-bullseye-slim AS builder
 
 WORKDIR /app
 
 # 复制依赖文件并安装，利用 Docker 缓存
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm install --no-audit --no-fund
 
 # 复制项目所有文件
 COPY . .
@@ -15,12 +15,12 @@ COPY . .
 ARG GEMINI_API_KEY
 ENV GEMINI_API_KEY=$GEMINI_API_KEY
 
-# 运行 Vite 构建
-RUN npm run build
+# 运行 Vite 构建（使用 npx 确保找到本地 vite）
+RUN npx vite build
 
 # Stage 2: 生产阶段
 # 使用轻量 Node 镜像作为生产环境
-FROM node:20-alpine
+FROM node:20-bullseye-slim
 
 WORKDIR /app
 
