@@ -11,7 +11,7 @@ export default defineConfig(({ mode }) => {
       },
       preview: {
         host: '0.0.0.0',
-        allowedHosts: ['influencer.reddithunter.com', 'localhost', '.reddithunter.com'],
+        allowedHosts: true,
       },
       plugins: [react()],
       define: {
