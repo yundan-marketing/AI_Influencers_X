@@ -1,0 +1,24 @@
+# 依赖
+node_modules
+npm-debug.log*
+
+# 构建产物
+dist
+dist-ssr
+
+# 环境文件（通过 docker-compose 或 -e 传入，不打包进镜像）
+.env
+.env.*
+!.env.example
+
+# 版本控制
+.git
+.gitignore
+
+# 文档与杂项
+README.md
+*.md
+.DS_Store
+.idea
+.vscode
+*.log

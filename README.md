@@ -42,3 +42,7 @@ There are millions of pieces of AI news and information generated every second o
 
 1. Install dependencies: `npm install`
 2. Run the app: `npm run dev`
+
+### 🐳 Run with Docker
+
+See **[docs/DOCKER_GUIDE.md](docs/DOCKER_GUIDE.md)** for Docker setup and usage.
