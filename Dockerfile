@@ -19,7 +19,7 @@ FROM node:20-bullseye-slim
 WORKDIR /app
 
 COPY package.json ./
-COPY vite.config.js ./
+COPY vite.config.ts ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
 
