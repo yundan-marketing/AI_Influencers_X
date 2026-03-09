@@ -1,12 +1,12 @@
 # Stage 1: 构建阶段
 # 使用 Node.js 镜像作为构建环境
-FROM node:22-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
 # 复制依赖文件并安装，利用 Docker 缓存
 COPY package.json package-lock.json* ./
-RUN npm ci 2>/dev/null || npm install
+RUN npm install
 
 # 复制项目所有文件
 COPY . .
@@ -20,7 +20,7 @@ RUN npm run build
 
 # Stage 2: 生产阶段
 # 使用轻量 Node 镜像作为生产环境
-FROM node:22-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
