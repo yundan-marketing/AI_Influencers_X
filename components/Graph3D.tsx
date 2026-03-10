@@ -543,13 +543,30 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
 
   // Node size based on follower count
   const getNodeSize = useCallback((node: any) => {
-    const followers = node.followers || 0;
-    if (followers >= 1000000) return 8;   // 1M+
-    if (followers >= 500000) return 6.5;  // 500K+
-    if (followers >= 100000) return 5;    // 100K+
-    if (followers >= 50000) return 4;     // 50K+
-    if (followers >= 10000) return 3.5;   // 10K+
-    return 3;
+    const followers = typeof node.followers === 'number' ? node.followers : 0;
+
+    // Higher-precision continuous mapping:
+    // normalize followers into a target range, then apply a gamma curve so mid/low range has more visible separation
+    if (followers > 0) {
+      const minF = 1_000;      // ~1K followers starts being "visible"
+      const maxF = 20_000_000; // ~20M treated as "giant star"
+      const minLg = Math.log10(minF + 1);
+      const maxLg = Math.log10(maxF + 1);
+      const lg = Math.log10(followers + 1);
+      let t = (lg - minLg) / (maxLg - minLg);
+      t = Math.max(0, Math.min(1, t));
+
+      // Gamma < 1 => expand low/mid differences (more "precision" visually)
+      t = Math.pow(t, 0.78);
+
+      const minSize = 3.0;
+      const maxSize = 11.0;
+      return minSize + t * (maxSize - minSize);
+    }
+
+    // Fallback for nodes without follower data: use connectivity degree (val)
+    const val = typeof node.val === 'number' ? node.val : 0;
+    return Math.min(6.0, Math.max(2.8, 2.8 + Math.sqrt(Math.max(0, val)) * 0.35));
   }, []);
 
   // Create node with glowing sphere (multiple layers) and HTML text label
@@ -607,7 +624,10 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     }
 
     // Thin orbit lines (prettier + less overdraw than filled rings)
-    const ringCount = Math.max(1, Math.min(3, Math.floor((node.val || 0) / 6) + 1));
+    const f = typeof node.followers === 'number' ? node.followers : 0;
+    const popScore = f > 0 ? Math.log10(f + 1) : 0;
+    const rel = popScore + Math.min(3, (node.val || 0) / 8);
+    const ringCount = Math.max(1, Math.min(3, Math.floor(rel / 2) + 1));
     for (let i = 0; i < ringCount; i++) {
       const r = nodeSize * (2.3 + i * 0.9);
       const segments = 72;
@@ -636,7 +656,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     }
 
     // Static "satellite" star dots along the outer orbit (cheap points)
-    const satCount = Math.max(4, Math.min(10, 4 + Math.floor((node.val || 0) / 5)));
+    const satCount = Math.max(4, Math.min(16, 4 + Math.floor(rel * 1.9) + Math.floor((node.val || 0) / 8)));
     const satR = nodeSize * (2.3 + (ringCount - 1) * 0.9);
     const satPositions = new Float32Array(satCount * 3);
     for (let i = 0; i < satCount; i++) {
