@@ -109,6 +109,64 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     return tex;
   }, []);
 
+  const createStarburstTexture = useCallback(() => {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    const cx = size / 2;
+    const cy = size / 2;
+
+    // Radial glow
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, size / 2);
+    g.addColorStop(0.0, 'rgba(255,255,255,1.0)');
+    g.addColorStop(0.18, 'rgba(255,255,255,0.8)');
+    g.addColorStop(0.45, 'rgba(255,255,255,0.25)');
+    g.addColorStop(1.0, 'rgba(0,0,0,0.0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+
+    // Soft spikes (4 main + 4 minor)
+    ctx.save();
+    ctx.translate(cx, cy);
+    const spikes = [
+      { w: 10, h: 110, a: 0.22 },
+      { w: 10, h: 110, a: 0.22, rot: Math.PI / 2 },
+      { w: 7, h: 85, a: 0.18, rot: Math.PI / 4 },
+      { w: 7, h: 85, a: 0.18, rot: (3 * Math.PI) / 4 },
+    ];
+
+    spikes.forEach(s => {
+      ctx.save();
+      ctx.rotate(s.rot || 0);
+      ctx.globalCompositeOperation = 'lighter';
+      const lg = ctx.createLinearGradient(0, 0, 0, -s.h);
+      lg.addColorStop(0.0, `rgba(255,255,255,${s.a})`);
+      lg.addColorStop(0.6, `rgba(255,255,255,${s.a * 0.5})`);
+      lg.addColorStop(1.0, 'rgba(255,255,255,0.0)');
+      ctx.fillStyle = lg;
+      ctx.beginPath();
+      ctx.moveTo(-s.w, 0);
+      ctx.lineTo(0, -s.h);
+      ctx.lineTo(s.w, 0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    });
+    ctx.restore();
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    return tex;
+  }, []);
+
   const nodeGlowTexture = useMemo(() => {
     return createRadialGradientTexture([
       { at: 0.0, color: 'rgba(255,255,255,1.0)' },
@@ -118,6 +176,8 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       { at: 1.0, color: 'rgba(0,0,0,0.0)' },
     ]);
   }, [createRadialGradientTexture]);
+
+  const nodeStarburstTexture = useMemo(() => createStarburstTexture(), [createStarburstTexture]);
 
   const createGalaxyBackdrop = useCallback(() => {
     const group = new THREE.Group();
@@ -501,50 +561,107 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
 
     const nodeMaterials: Array<(THREE.Material & { color?: THREE.Color })> = [];
 
-    // Core star
-    const coreGeometry = new THREE.SphereGeometry(nodeSize * 0.75, 14, 14);
-    const coreMaterial = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.95 });
+    // Deterministic style seed (avoid visual jitter across re-renders)
+    const seed = hashToUnit(String(node.id || node.name || 'node'));
+    const seed2 = hashToUnit(`b:${String(node.id || node.name || 'node')}`);
+
+    // Core (small, bright)
+    const coreGeometry = new THREE.SphereGeometry(nodeSize * 0.62, 12, 12);
+    const coreMaterial = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.98 });
     const core = new THREE.Mesh(coreGeometry, coreMaterial);
     group.add(core);
     nodeMaterials.push(coreMaterial);
 
-    // Halo glow sprite (very cheap vs multi-sphere glow)
-    if (nodeGlowTexture) {
-      const haloMaterial = new THREE.SpriteMaterial({
-        map: nodeGlowTexture,
+    // Inner starburst sprite (crisper "star" feel)
+    if (nodeStarburstTexture) {
+      const burstMaterial = new THREE.SpriteMaterial({
+        map: nodeStarburstTexture,
         color: new THREE.Color(baseColor),
         transparent: true,
         opacity: 0.55,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
+      const burst = new THREE.Sprite(burstMaterial);
+      burst.scale.set(nodeSize * 8.5, nodeSize * 8.5, 1);
+      burst.position.set(0, 0, 0);
+      group.add(burst);
+      nodeMaterials.push(burstMaterial as any);
+    }
+
+    // Outer halo sprite (soft bloom)
+    if (nodeGlowTexture) {
+      const haloMaterial = new THREE.SpriteMaterial({
+        map: nodeGlowTexture,
+        color: new THREE.Color(baseColor),
+        transparent: true,
+        opacity: 0.22,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
       const halo = new THREE.Sprite(haloMaterial);
-      halo.scale.set(nodeSize * 10, nodeSize * 10, 1);
+      halo.scale.set(nodeSize * 15, nodeSize * 15, 1);
       halo.position.set(0, 0, 0);
       group.add(halo);
       nodeMaterials.push(haloMaterial as any);
     }
 
-    // Orbit rings for "mini galaxy" look when links are hidden
-    const ringCount = Math.max(1, Math.min(2, Math.floor((node.val || 0) / 6) + 1));
+    // Thin orbit lines (prettier + less overdraw than filled rings)
+    const ringCount = Math.max(1, Math.min(3, Math.floor((node.val || 0) / 6) + 1));
     for (let i = 0; i < ringCount; i++) {
-      const r = nodeSize * (2.3 + i * 0.8);
-      const ringGeo = new THREE.RingGeometry(r * 0.88, r, 36);
-      const ringMat = new THREE.MeshBasicMaterial({
+      const r = nodeSize * (2.3 + i * 0.9);
+      const segments = 72;
+      const positions = new Float32Array((segments + 1) * 3);
+      for (let s = 0; s <= segments; s++) {
+        const a = (s / segments) * Math.PI * 2;
+        positions[s * 3] = Math.cos(a) * r;
+        positions[s * 3 + 1] = 0;
+        positions[s * 3 + 2] = Math.sin(a) * r;
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      const mat = new THREE.LineBasicMaterial({
         color: baseColor,
         transparent: true,
-        opacity: 0.16,
-        side: THREE.DoubleSide,
-        depthWrite: false,
+        opacity: 0.16 - i * 0.03,
         blending: THREE.AdditiveBlending,
+        depthWrite: false,
       });
-      const ring = new THREE.Mesh(ringGeo, ringMat);
-      ring.rotation.x = (Math.random() - 0.5) * 1.2;
-      ring.rotation.y = (Math.random() - 0.5) * 1.2;
-      ring.rotation.z = (Math.random() - 0.5) * 1.2;
-      group.add(ring);
-      nodeMaterials.push(ringMat);
+      const line = new THREE.Line(geo, mat);
+      line.rotation.x = (seed * 0.9 + i * 0.25) * 1.1;
+      line.rotation.y = (seed2 * 0.9 + i * 0.35) * 1.1;
+      line.rotation.z = ((seed + seed2) * 0.6 + i * 0.15) * 1.1;
+      group.add(line);
+      nodeMaterials.push(mat as any);
     }
+
+    // Static "satellite" star dots along the outer orbit (cheap points)
+    const satCount = Math.max(4, Math.min(10, 4 + Math.floor((node.val || 0) / 5)));
+    const satR = nodeSize * (2.3 + (ringCount - 1) * 0.9);
+    const satPositions = new Float32Array(satCount * 3);
+    for (let i = 0; i < satCount; i++) {
+      const a = (i / satCount) * Math.PI * 2 + seed * Math.PI * 2;
+      const jitter = (hashToUnit(`${node.id}:${i}`) - 0.5) * nodeSize * 0.35;
+      satPositions[i * 3] = Math.cos(a) * (satR + jitter);
+      satPositions[i * 3 + 1] = (hashToUnit(`y:${node.id}:${i}`) - 0.5) * nodeSize * 0.4;
+      satPositions[i * 3 + 2] = Math.sin(a) * (satR + jitter);
+    }
+    const satGeo = new THREE.BufferGeometry();
+    satGeo.setAttribute('position', new THREE.BufferAttribute(satPositions, 3));
+    const satMat = new THREE.PointsMaterial({
+      size: 1.6,
+      sizeAttenuation: true,
+      color: baseColor,
+      transparent: true,
+      opacity: 0.75,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const sats = new THREE.Points(satGeo, satMat);
+    sats.rotation.x = seed * 1.2;
+    sats.rotation.y = seed2 * 1.2;
+    group.add(sats);
+    nodeMaterials.push(satMat as any);
 
     // Store all materials for dynamic color updates
     materialsRef.current.set(node.id, nodeMaterials);
@@ -571,7 +688,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     labelsRef.current.set(node.id, { element: labelDiv, object: group });
 
     return group;
-  }, [getNodeSize, getCategoryColor, nodeGlowTexture]);
+  }, [getNodeSize, getCategoryColor, nodeGlowTexture, nodeStarburstTexture, hashToUnit]);
 
   // Set up CSS2DRenderer for HTML labels
   const extraRenderers = useMemo(() => [new CSS2DRenderer()], []);
