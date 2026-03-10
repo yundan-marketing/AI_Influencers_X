@@ -33,6 +33,19 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     return ((h >>> 0) % 10000) / 10000;
   }, []);
 
+  const getFollowerT = useCallback((followers: unknown) => {
+    if (typeof followers !== 'number' || followers <= 0) return 0;
+    const minF = 1_000;
+    const maxF = 20_000_000;
+    const minLg = Math.log10(minF + 1);
+    const maxLg = Math.log10(maxF + 1);
+    const lg = Math.log10(followers + 1);
+    let t = (lg - minLg) / (maxLg - minLg);
+    t = Math.max(0, Math.min(1, t));
+    // Expand low/mid differences
+    return Math.pow(t, 0.78);
+  }, []);
+
   // Renderer perf tuning (lower DPR = big GPU savings)
   useEffect(() => {
     let cancelled = false;
@@ -188,7 +201,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     const dpr = window.devicePixelRatio || 1;
     const quality = Math.max(0.45, Math.min(1, (isMobile ? 0.7 : 1) * (1.1 / Math.min(dpr, 2))));
 
-    const starCount = Math.round(2200 * quality);
+    const starCount = Math.round(2600 * quality);
     const starPositions = new Float32Array(starCount * 3);
     const starColors = new Float32Array(starCount * 3);
 
@@ -231,7 +244,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       sizeAttenuation: true,
       vertexColors: true,
       transparent: true,
-      opacity: 0.6,
+      opacity: 0.72,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
@@ -241,7 +254,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
 
     // 2) Spiral disk (galaxy arms)
     const armCount = 2;
-    const diskCount = Math.round(2000 * quality);
+    const diskCount = Math.round(2600 * quality);
     const diskPositions = new Float32Array(diskCount * 3);
     const diskColors = new Float32Array(diskCount * 3);
 
@@ -293,7 +306,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       sizeAttenuation: true,
       vertexColors: true,
       transparent: true,
-      opacity: 0.45,
+      opacity: 0.58,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
@@ -313,15 +326,37 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       const spriteMat = new THREE.SpriteMaterial({
         map: tex,
         transparent: true,
-        opacity: 0.7,
+        opacity: 0.82,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
       const sprite = new THREE.Sprite(spriteMat);
       sprite.name = 'galaxy-core';
-      sprite.scale.set(760, 760, 1);
+      sprite.scale.set(900, 900, 1);
       sprite.position.set(0, 0, 0);
       group.add(sprite);
+    }
+
+    // 4) Large faint nebula layer (makes the galaxy more obvious)
+    const nebulaTex = createRadialGradientTexture([
+      { at: 0.0, color: 'rgba(124,58,237,0.22)' },
+      { at: 0.25, color: 'rgba(6,182,212,0.12)' },
+      { at: 0.55, color: 'rgba(255,255,255,0.04)' },
+      { at: 1.0, color: 'rgba(0,0,0,0.0)' },
+    ]);
+    if (nebulaTex) {
+      const nebulaMat = new THREE.SpriteMaterial({
+        map: nebulaTex,
+        transparent: true,
+        opacity: 0.7,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const nebula = new THREE.Sprite(nebulaMat);
+      nebula.name = 'galaxy-nebula';
+      nebula.scale.set(2000, 2000, 1);
+      nebula.position.set(0, 0, 0);
+      group.add(nebula);
     }
 
     // Tilt the galaxy a bit for depth
@@ -447,6 +482,28 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     return { nodes: filteredNodes, links: finalLinks };
   }, [data, keepOrphans, hashToUnit]);
 
+  // When a node is selected, show at most 3 outgoing relationships (sorted by target followers)
+  const selectedTopTargets = useMemo(() => {
+    if (!selectedNode) return null as Set<string> | null;
+    const nodeById = new Map<string, GraphNode>();
+    processedData.nodes.forEach(n => nodeById.set(n.id, n));
+
+    const outgoing = processedData.links
+      .map((l: any) => ({
+        s: typeof l.source === 'object' ? l.source.id : l.source,
+        t: typeof l.target === 'object' ? l.target.id : l.target,
+      }))
+      .filter(x => String(x.s) === selectedNode.id)
+      .map(x => ({
+        t: String(x.t),
+        followers: nodeById.get(String(x.t))?.followers || 0,
+      }))
+      .sort((a, b) => (b.followers || 0) - (a.followers || 0))
+      .slice(0, 3);
+
+    return new Set(outgoing.map(o => o.t));
+  }, [selectedNode, processedData.links, processedData.nodes]);
+
 
 
   // Identify connected neighbors for the selected node
@@ -488,6 +545,66 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       });
     }
   }, [processedData]);
+
+  // Galaxy motion: when nothing is selected, slowly rotate all nodes like a galaxy.
+  // When a node is selected, freeze this motion for inspection.
+  useEffect(() => {
+    const fg = graphRef.current;
+    if (!fg) return;
+
+    if (selectedNode) {
+      fg.d3Force('galacticRotation', null);
+      return;
+    }
+
+    const makeGalacticRotationForce = () => {
+      let nodes: any[] = [];
+      const axisTilt = -0.28; // keep similar to backdrop tilt feel
+      const cosT = Math.cos(axisTilt);
+      const sinT = Math.sin(axisTilt);
+
+      const force: any = (alpha: number) => {
+        // alpha falls from ~1 to 0; keep speed stable-ish but still gentle
+        const speed = 0.0014 * (0.35 + Math.min(1, alpha));
+        const cosA = Math.cos(speed);
+        const sinA = Math.sin(speed);
+
+        for (let i = 0; i < nodes.length; i++) {
+          const n = nodes[i];
+          if (!n) continue;
+
+          // Rotate around a slightly tilted axis by transforming into tilted space, rotating, then inverse
+          const x0 = n.x || 0;
+          const y0 = n.y || 0;
+          const z0 = n.z || 0;
+
+          // tilt around X axis
+          const y1 = y0 * cosT - z0 * sinT;
+          const z1 = y0 * sinT + z0 * cosT;
+
+          // rotate around Y axis in tilted space
+          const x2 = x0 * cosA - z1 * sinA;
+          const z2 = x0 * sinA + z1 * cosA;
+
+          // inverse tilt around X axis
+          const y3 = y1 * cosT + z2 * sinT;
+          const z3 = -y1 * sinT + z2 * cosT;
+
+          n.x = x2;
+          n.y = y3;
+          n.z = z3;
+        }
+      };
+
+      force.initialize = (_nodes: any[]) => {
+        nodes = _nodes || [];
+      };
+
+      return force;
+    };
+
+    fg.d3Force('galacticRotation', makeGalacticRotationForce());
+  }, [selectedNode]);
 
   // Center camera on selected node
   useEffect(() => {
@@ -548,16 +665,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     // Higher-precision continuous mapping:
     // normalize followers into a target range, then apply a gamma curve so mid/low range has more visible separation
     if (followers > 0) {
-      const minF = 1_000;      // ~1K followers starts being "visible"
-      const maxF = 20_000_000; // ~20M treated as "giant star"
-      const minLg = Math.log10(minF + 1);
-      const maxLg = Math.log10(maxF + 1);
-      const lg = Math.log10(followers + 1);
-      let t = (lg - minLg) / (maxLg - minLg);
-      t = Math.max(0, Math.min(1, t));
-
-      // Gamma < 1 => expand low/mid differences (more "precision" visually)
-      t = Math.pow(t, 0.78);
+      const t = getFollowerT(followers);
 
       const minSize = 3.0;
       const maxSize = 11.0;
@@ -567,7 +675,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     // Fallback for nodes without follower data: use connectivity degree (val)
     const val = typeof node.val === 'number' ? node.val : 0;
     return Math.min(6.0, Math.max(2.8, 2.8 + Math.sqrt(Math.max(0, val)) * 0.35));
-  }, []);
+  }, [getFollowerT]);
 
   // Create node with glowing sphere (multiple layers) and HTML text label
   const nodeThreeObject = useCallback((node: any) => {
@@ -581,10 +689,11 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     // Deterministic style seed (avoid visual jitter across re-renders)
     const seed = hashToUnit(String(node.id || node.name || 'node'));
     const seed2 = hashToUnit(`b:${String(node.id || node.name || 'node')}`);
+    const tF = getFollowerT(node.followers);
 
     // Core (small, bright)
     const coreGeometry = new THREE.SphereGeometry(nodeSize * 0.62, 12, 12);
-    const coreMaterial = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.98 });
+    const coreMaterial = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.90 + tF * 0.09 });
     const core = new THREE.Mesh(coreGeometry, coreMaterial);
     group.add(core);
     nodeMaterials.push(coreMaterial);
@@ -595,7 +704,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
         map: nodeStarburstTexture,
         color: new THREE.Color(baseColor),
         transparent: true,
-        opacity: 0.55,
+        opacity: 0.35 + tF * 0.35,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
@@ -612,7 +721,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
         map: nodeGlowTexture,
         color: new THREE.Color(baseColor),
         transparent: true,
-        opacity: 0.22,
+        opacity: 0.12 + tF * 0.22,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
@@ -624,10 +733,8 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     }
 
     // Thin orbit lines (prettier + less overdraw than filled rings)
-    const f = typeof node.followers === 'number' ? node.followers : 0;
-    const popScore = f > 0 ? Math.log10(f + 1) : 0;
-    const rel = popScore + Math.min(3, (node.val || 0) / 8);
-    const ringCount = Math.max(1, Math.min(3, Math.floor(rel / 2) + 1));
+    // Max 3 lines, driven mostly by followers
+    const ringCount = Math.max(1, Math.min(3, 1 + Math.floor(tF * 2.001)));
     for (let i = 0; i < ringCount; i++) {
       const r = nodeSize * (2.3 + i * 0.9);
       const segments = 72;
@@ -643,7 +750,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       const mat = new THREE.LineBasicMaterial({
         color: baseColor,
         transparent: true,
-        opacity: 0.16 - i * 0.03,
+        opacity: Math.max(0.06, (0.08 + tF * 0.18) - i * 0.04),
         blending: THREE.AdditiveBlending,
         depthWrite: false,
       });
@@ -656,7 +763,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     }
 
     // Static "satellite" star dots along the outer orbit (cheap points)
-    const satCount = Math.max(4, Math.min(16, 4 + Math.floor(rel * 1.9) + Math.floor((node.val || 0) / 8)));
+    const satCount = Math.max(4, Math.min(16, 4 + Math.floor(tF * 10)));
     const satR = nodeSize * (2.3 + (ringCount - 1) * 0.9);
     const satPositions = new Float32Array(satCount * 3);
     for (let i = 0; i < satCount; i++) {
@@ -673,7 +780,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       sizeAttenuation: true,
       color: baseColor,
       transparent: true,
-      opacity: 0.75,
+      opacity: 0.55 + tF * 0.35,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
     });
@@ -708,7 +815,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     labelsRef.current.set(node.id, { element: labelDiv, object: group });
 
     return group;
-  }, [getNodeSize, getCategoryColor, nodeGlowTexture, nodeStarburstTexture, hashToUnit]);
+  }, [getNodeSize, getCategoryColor, nodeGlowTexture, nodeStarburstTexture, hashToUnit, getFollowerT]);
 
   // Set up CSS2DRenderer for HTML labels
   const extraRenderers = useMemo(() => [new CSS2DRenderer()], []);
@@ -765,8 +872,8 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       // Galaxy subtle rotation (cheap) every frame
       if (galaxyRef.current) {
         const s = Math.min(50, Math.max(0, dt)) / 16.67; // normalize ~60fps
-        galaxyRef.current.rotation.y += 0.00035 * s;
-        galaxyRef.current.rotation.z += 0.00008 * s;
+        galaxyRef.current.rotation.y += 0.00055 * s;
+        galaxyRef.current.rotation.z += 0.00010 * s;
       }
 
       // Labels are CPU-heavy: update at ~10-12fps
@@ -810,9 +917,12 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     if (!selectedNode) return false;
 
     const sId = typeof link.source === 'object' ? link.source.id : link.source;
+    const tId = typeof link.target === 'object' ? link.target.id : link.target;
 
-    return sId === selectedNode.id;
-  }, [selectedNode]);
+    if (String(sId) !== selectedNode.id) return false;
+    if (!selectedTopTargets) return false;
+    return selectedTopTargets.has(String(tId));
+  }, [selectedNode, selectedTopTargets]);
 
   // Link color - dimmer when showing all, brighter for selected node's links
   const getLinkColor = useCallback((link: any) => {
@@ -904,8 +1014,12 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
 
         // Link Styling - Simple white lines with visibility control
         linkVisibility={getLinkVisibility}
-        linkColor={selectedNode ? 'rgba(255, 255, 255, 0.4)' : 'rgba(255, 255, 255, 0.07)'}
-        linkWidth={selectedNode ? 1.15 : 0.7}
+        linkColor={
+          selectedNode
+            ? `rgba(255, 255, 255, ${0.18 + getFollowerT(selectedNode.followers) * 0.45})`
+            : 'rgba(255, 255, 255, 0.07)'
+        }
+        linkWidth={selectedNode ? (0.9 + getFollowerT(selectedNode.followers) * 1.2) : 0.7}
         linkOpacity={1}
         linkResolution={selectedNode ? 4 : 2}
         linkCurvature={(link: any) => {
@@ -917,8 +1031,8 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
         }}
         linkDirectionalParticles={selectedNode ? 1 : 0}
         linkDirectionalParticleColor={() => 'rgba(255,255,255,0.85)'}
-        linkDirectionalParticleWidth={1.4}
-        linkDirectionalParticleSpeed={0.007}
+        linkDirectionalParticleWidth={selectedNode ? (1.0 + getFollowerT(selectedNode.followers) * 1.2) : 1.4}
+        linkDirectionalParticleSpeed={selectedNode ? (0.006 + getFollowerT(selectedNode.followers) * 0.006) : 0.007}
 
         // Interaction
         enableNodeDrag={true}
