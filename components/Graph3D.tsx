@@ -16,10 +16,42 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
   const graphRef = useRef<ForceGraphMethods>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const labelsRef = useRef<Map<string, { element: HTMLDivElement; object: THREE.Object3D }>>(new Map());
-  const materialsRef = useRef<Map<string, THREE.MeshBasicMaterial[]>>(new Map());
+  const materialsRef = useRef<Map<string, Array<(THREE.Material & { color?: THREE.Color })>>>(new Map());
+  const galaxyRef = useRef<THREE.Group | null>(null);
 
   // Track container dimensions for responsive sizing
   const [dimensions, setDimensions] = useState({ width: window.innerWidth, height: window.innerHeight });
+
+  const hashToUnit = useCallback((str: string) => {
+    // Deterministic 0..1 hash for stable link rotations/curvature
+    let h = 2166136261;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    // >>> 0 ensures unsigned
+    return ((h >>> 0) % 10000) / 10000;
+  }, []);
+
+  // Renderer perf tuning (lower DPR = big GPU savings)
+  useEffect(() => {
+    let cancelled = false;
+    const apply = () => {
+      const fg = graphRef.current;
+      const renderer: any = fg ? (fg as any).renderer?.() : null;
+      if (renderer) {
+        const dpr = window.devicePixelRatio || 1;
+        // Keep conservative — galaxy uses lots of transparent particles
+        renderer.setPixelRatio(Math.min(dpr, 1.1));
+        return;
+      }
+      if (!cancelled) requestAnimationFrame(apply);
+    };
+    apply();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Handle window resize
   useEffect(() => {
@@ -55,6 +87,229 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     };
   }, []);
 
+  const createRadialGradientTexture = useCallback((stops: Array<{ at: number; color: string }>) => {
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+
+    const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    stops.forEach(s => g.addColorStop(s.at, s.color));
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, size, size);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    return tex;
+  }, []);
+
+  const nodeGlowTexture = useMemo(() => {
+    return createRadialGradientTexture([
+      { at: 0.0, color: 'rgba(255,255,255,1.0)' },
+      { at: 0.12, color: 'rgba(255,255,255,0.85)' },
+      { at: 0.35, color: 'rgba(255,255,255,0.35)' },
+      { at: 0.7, color: 'rgba(255,255,255,0.08)' },
+      { at: 1.0, color: 'rgba(0,0,0,0.0)' },
+    ]);
+  }, [createRadialGradientTexture]);
+
+  const createGalaxyBackdrop = useCallback(() => {
+    const group = new THREE.Group();
+    group.name = 'galaxy-backdrop';
+
+    // 1) Background stars (spherical distribution)
+    const isMobile = window.innerWidth < 768;
+    const dpr = window.devicePixelRatio || 1;
+    const quality = Math.max(0.45, Math.min(1, (isMobile ? 0.7 : 1) * (1.1 / Math.min(dpr, 2))));
+
+    const starCount = Math.round(2200 * quality);
+    const starPositions = new Float32Array(starCount * 3);
+    const starColors = new Float32Array(starCount * 3);
+
+    const c1 = new THREE.Color('#FFFFFF');
+    const c2 = new THREE.Color('#A3D4FF');
+    const c3 = new THREE.Color('#E0B3FF');
+
+    for (let i = 0; i < starCount; i++) {
+      // random point in a shell
+      const u = Math.random();
+      const v = Math.random();
+      const theta = 2 * Math.PI * u;
+      const phi = Math.acos(2 * v - 1);
+      const r = 1400 + Math.random() * 1400;
+      const sinPhi = Math.sin(phi);
+
+      const x = r * sinPhi * Math.cos(theta);
+      const y = r * Math.cos(phi);
+      const z = r * sinPhi * Math.sin(theta);
+
+      const idx = i * 3;
+      starPositions[idx] = x;
+      starPositions[idx + 1] = y;
+      starPositions[idx + 2] = z;
+
+      const pick = Math.random();
+      const col = pick < 0.7 ? c1 : pick < 0.85 ? c2 : c3;
+      // subtle variance
+      const variance = 0.85 + Math.random() * 0.3;
+      starColors[idx] = col.r * variance;
+      starColors[idx + 1] = col.g * variance;
+      starColors[idx + 2] = col.b * variance;
+    }
+
+    const starGeo = new THREE.BufferGeometry();
+    starGeo.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    starGeo.setAttribute('color', new THREE.BufferAttribute(starColors, 3));
+    const starMat = new THREE.PointsMaterial({
+      size: 1.35,
+      sizeAttenuation: true,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.6,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const stars = new THREE.Points(starGeo, starMat);
+    stars.name = 'galaxy-stars';
+    group.add(stars);
+
+    // 2) Spiral disk (galaxy arms)
+    const armCount = 2;
+    const diskCount = Math.round(2000 * quality);
+    const diskPositions = new Float32Array(diskCount * 3);
+    const diskColors = new Float32Array(diskCount * 3);
+
+    const innerR = 40;
+    const outerR = 750;
+
+    const armA = new THREE.Color('#7C3AED'); // violet
+    const armB = new THREE.Color('#06B6D4'); // cyan
+    const coreC = new THREE.Color('#FFFFFF');
+
+    for (let i = 0; i < diskCount; i++) {
+      const t = Math.random(); // 0..1 radial progression
+      // bias points toward center slightly
+      const r = innerR + (outerR - innerR) * Math.pow(t, 0.55);
+      const arm = Math.floor(Math.random() * armCount);
+      const armOffset = (arm / armCount) * Math.PI * 2;
+
+      // logarithmic spiral angle with jitter
+      const spiralTightness = 1.9; // larger => tighter arms
+      const angle = armOffset + (r / outerR) * Math.PI * 2 * spiralTightness + (Math.random() - 0.5) * 0.55;
+
+      // disk thickness + slight vertical warp
+      const thickness = (1 - r / outerR) * 28 + 6;
+      const y = (Math.random() - 0.5) * thickness;
+
+      const x = Math.cos(angle) * r + (Math.random() - 0.5) * 10;
+      const z = Math.sin(angle) * r + (Math.random() - 0.5) * 10;
+
+      const idx = i * 3;
+      diskPositions[idx] = x;
+      diskPositions[idx + 1] = y;
+      diskPositions[idx + 2] = z;
+
+      // color gradient: core -> arms
+      const mix = Math.min(1, r / outerR);
+      const armColor = arm === 0 ? armA : armB;
+      const col = coreC.clone().lerp(armColor, mix);
+      const a = 0.7 + Math.random() * 0.3;
+      diskColors[idx] = col.r * a;
+      diskColors[idx + 1] = col.g * a;
+      diskColors[idx + 2] = col.b * a;
+    }
+
+    const diskGeo = new THREE.BufferGeometry();
+    diskGeo.setAttribute('position', new THREE.BufferAttribute(diskPositions, 3));
+    diskGeo.setAttribute('color', new THREE.BufferAttribute(diskColors, 3));
+    const diskMat = new THREE.PointsMaterial({
+      size: 1.9,
+      sizeAttenuation: true,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.45,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const disk = new THREE.Points(diskGeo, diskMat);
+    disk.name = 'galaxy-disk';
+    group.add(disk);
+
+    // 3) Core glow sprite
+    const tex = createRadialGradientTexture([
+      { at: 0.0, color: 'rgba(255,255,255,0.95)' },
+      { at: 0.15, color: 'rgba(180,220,255,0.55)' },
+      { at: 0.35, color: 'rgba(124,58,237,0.25)' },
+      { at: 0.65, color: 'rgba(6,182,212,0.10)' },
+      { at: 1.0, color: 'rgba(0,0,0,0.0)' },
+    ]);
+    if (tex) {
+      const spriteMat = new THREE.SpriteMaterial({
+        map: tex,
+        transparent: true,
+        opacity: 0.7,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const sprite = new THREE.Sprite(spriteMat);
+      sprite.name = 'galaxy-core';
+      sprite.scale.set(760, 760, 1);
+      sprite.position.set(0, 0, 0);
+      group.add(sprite);
+    }
+
+    // Tilt the galaxy a bit for depth
+    group.rotation.x = -0.35;
+    group.rotation.z = 0.08;
+
+    return group;
+  }, [createRadialGradientTexture]);
+
+  // Add galaxy backdrop objects into the ForceGraph scene
+  useEffect(() => {
+    const fg = graphRef.current;
+    if (!fg) return;
+
+    const scene = fg.scene();
+    if (!scene) return;
+
+    // Avoid duplicates
+    if (galaxyRef.current) {
+      scene.remove(galaxyRef.current);
+      galaxyRef.current = null;
+    }
+
+    const galaxy = createGalaxyBackdrop();
+    galaxy.renderOrder = -1;
+    galaxyRef.current = galaxy;
+    scene.add(galaxy);
+
+    // Fog is pretty but costs fragment work with heavy blending
+    scene.fog = null;
+
+    return () => {
+      // Clean up objects/materials/geometries
+      if (galaxyRef.current) {
+        scene.remove(galaxyRef.current);
+        galaxyRef.current.traverse((obj: any) => {
+          if (obj?.geometry?.dispose) obj.geometry.dispose();
+          if (obj?.material) {
+            if (Array.isArray(obj.material)) obj.material.forEach((m: any) => m?.dispose?.());
+            else obj.material?.dispose?.();
+          }
+          if (obj?.material?.map?.dispose) obj.material.map.dispose();
+        });
+        galaxyRef.current = null;
+      }
+    };
+  }, [createGalaxyBackdrop]);
+
   // Process data: Clean links, calculate degrees, and filter disconnected nodes
   const processedData = useMemo(() => {
     // Basic defensive check
@@ -77,7 +332,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     const nodeIds = new Set(uniqueNodesMap.keys());
     const validLinks: any[] = [];
 
-    // 2. Build & Validate Links
+    // 2. Build & Validate Links (precompute curvature/rotation for perf)
     (data.links || []).forEach(link => {
         if (!link) return;
 
@@ -97,10 +352,13 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
         }
 
         if (sourceId && targetId && nodeIds.has(sourceId) && nodeIds.has(targetId)) {
+            const u = hashToUnit(`${sourceId}->${targetId}`);
             validLinks.push({
                 source: sourceId,
                 target: targetId,
-                value: link.value || 1
+                value: link.value || 1,
+                __curvature: 0.14 + u * 0.18,
+                __rotation: hashToUnit(`${targetId}<-${sourceId}`) * Math.PI * 2,
             });
         }
     });
@@ -127,7 +385,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     const finalLinks = validLinks.filter(l => finalNodeIds.has(l.source) && finalNodeIds.has(l.target));
 
     return { nodes: filteredNodes, links: finalLinks };
-  }, [data, keepOrphans]);
+  }, [data, keepOrphans, hashToUnit]);
 
 
 
@@ -241,41 +499,55 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     const nodeSize = getNodeSize(node);
     const baseColor = getCategoryColor(node.group || 'company');
 
-    // Create glow using many layered transparent spheres
-    const glowMaterials: THREE.MeshBasicMaterial[] = [];
-    const numLayers = 20;
+    const nodeMaterials: Array<(THREE.Material & { color?: THREE.Color })> = [];
 
-    for (let i = numLayers - 1; i >= 0; i--) {
-      const t = i / numLayers; // 1 to 0 (outside to inside)
-      const scale = 1.0 + (t * 1.2); // 1.0 to 2.2 (smaller glow)
-      // Smooth cubic falloff for opacity
-      const opacity = 0.05 + (Math.pow(1 - t, 3) * 0.4);
-
-      const layerGeometry = new THREE.SphereGeometry(nodeSize * scale, 24, 24);
-      const layerMaterial = new THREE.MeshBasicMaterial({
-        color: baseColor,
-        transparent: true,
-        opacity: opacity,
-        depthWrite: false,
-      });
-      const layerMesh = new THREE.Mesh(layerGeometry, layerMaterial);
-      group.add(layerMesh);
-      glowMaterials.push(layerMaterial);
-    }
-
-    // Bigger bright core
-    const coreGeometry = new THREE.SphereGeometry(nodeSize * 0.85, 20, 20);
-    const coreMaterial = new THREE.MeshBasicMaterial({
-      color: baseColor,
-      transparent: true,
-      opacity: 0.95
-    });
+    // Core star
+    const coreGeometry = new THREE.SphereGeometry(nodeSize * 0.75, 14, 14);
+    const coreMaterial = new THREE.MeshBasicMaterial({ color: baseColor, transparent: true, opacity: 0.95 });
     const core = new THREE.Mesh(coreGeometry, coreMaterial);
     group.add(core);
-    glowMaterials.push(coreMaterial);
+    nodeMaterials.push(coreMaterial);
+
+    // Halo glow sprite (very cheap vs multi-sphere glow)
+    if (nodeGlowTexture) {
+      const haloMaterial = new THREE.SpriteMaterial({
+        map: nodeGlowTexture,
+        color: new THREE.Color(baseColor),
+        transparent: true,
+        opacity: 0.55,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const halo = new THREE.Sprite(haloMaterial);
+      halo.scale.set(nodeSize * 10, nodeSize * 10, 1);
+      halo.position.set(0, 0, 0);
+      group.add(halo);
+      nodeMaterials.push(haloMaterial as any);
+    }
+
+    // Orbit rings for "mini galaxy" look when links are hidden
+    const ringCount = Math.max(1, Math.min(2, Math.floor((node.val || 0) / 6) + 1));
+    for (let i = 0; i < ringCount; i++) {
+      const r = nodeSize * (2.3 + i * 0.8);
+      const ringGeo = new THREE.RingGeometry(r * 0.88, r, 36);
+      const ringMat = new THREE.MeshBasicMaterial({
+        color: baseColor,
+        transparent: true,
+        opacity: 0.16,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = (Math.random() - 0.5) * 1.2;
+      ring.rotation.y = (Math.random() - 0.5) * 1.2;
+      ring.rotation.z = (Math.random() - 0.5) * 1.2;
+      group.add(ring);
+      nodeMaterials.push(ringMat);
+    }
 
     // Store all materials for dynamic color updates
-    (materialsRef.current as any).set(node.id, glowMaterials);
+    materialsRef.current.set(node.id, nodeMaterials);
 
     // Create HTML text label
     const labelDiv = document.createElement('div');
@@ -299,7 +571,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
     labelsRef.current.set(node.id, { element: labelDiv, object: group });
 
     return group;
-  }, [getNodeSize, getCategoryColor]);
+  }, [getNodeSize, getCategoryColor, nodeGlowTexture]);
 
   // Set up CSS2DRenderer for HTML labels
   const extraRenderers = useMemo(() => [new CSS2DRenderer()], []);
@@ -316,6 +588,7 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       if (!camera) return;
 
       const cameraPos = camera.position;
+      const worldPos = new THREE.Vector3();
 
       labelsRef.current.forEach(({ element, object }, nodeId) => {
         // Always show selected node and its neighbors
@@ -328,7 +601,6 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
         }
 
         // Get world position of the node
-        const worldPos = new THREE.Vector3();
         object.getWorldPosition(worldPos);
 
         // Calculate distance from camera
@@ -346,8 +618,25 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
 
     // Update visibility on animation frame
     let animationId: number;
+    let lastLabelUpdate = 0;
+    let lastFrameTime = performance.now();
     const animate = () => {
-      updateLabelVisibility();
+      const now = performance.now();
+      const dt = now - lastFrameTime;
+      lastFrameTime = now;
+
+      // Galaxy subtle rotation (cheap) every frame
+      if (galaxyRef.current) {
+        const s = Math.min(50, Math.max(0, dt)) / 16.67; // normalize ~60fps
+        galaxyRef.current.rotation.y += 0.00035 * s;
+        galaxyRef.current.rotation.z += 0.00008 * s;
+      }
+
+      // Labels are CPU-heavy: update at ~10-12fps
+      if (now - lastLabelUpdate > 90) {
+        lastLabelUpdate = now;
+        updateLabelVisibility();
+      }
       animationId = requestAnimationFrame(animate);
     };
     animate();
@@ -367,7 +656,8 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
       const materialsArray = Array.isArray(materials) ? materials : [materials];
       const isHighlighted = !selectedNode || nodeId === selectedNode.id || neighborIds.has(nodeId);
 
-      materialsArray.forEach((mat: THREE.MeshBasicMaterial, index: number) => {
+      materialsArray.forEach((mat: any) => {
+        if (!mat?.color) return;
         if (isHighlighted) {
           mat.color.set(baseColor);
         } else {
@@ -379,7 +669,8 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
 
   // Link visibility - show all when nothing selected, only outgoing when a node is selected
   const getLinkVisibility = useCallback((link: any) => {
-    if (!selectedNode) return true;
+    // Initial state: hide links (galaxy-only). Show only when selecting a node.
+    if (!selectedNode) return false;
 
     const sId = typeof link.source === 'object' ? link.source.id : link.source;
 
@@ -476,10 +767,21 @@ const Graph3D: React.FC<Graph3DProps> = ({ data, onNodeClick, onClearSelection, 
 
         // Link Styling - Simple white lines with visibility control
         linkVisibility={getLinkVisibility}
-        linkColor={getLinkColor}
-        linkWidth={1}
+        linkColor={selectedNode ? 'rgba(255, 255, 255, 0.4)' : 'rgba(255, 255, 255, 0.07)'}
+        linkWidth={selectedNode ? 1.15 : 0.7}
         linkOpacity={1}
-        linkDirectionalParticles={0}
+        linkResolution={selectedNode ? 4 : 2}
+        linkCurvature={(link: any) => {
+          // Curved links are expensive. Keep straight in overview.
+          return selectedNode ? Math.min(0.45, (link.__curvature || 0.2) + 0.12) : 0;
+        }}
+        linkCurveRotation={(link: any) => {
+          return selectedNode ? (link.__rotation || 0) : 0;
+        }}
+        linkDirectionalParticles={selectedNode ? 1 : 0}
+        linkDirectionalParticleColor={() => 'rgba(255,255,255,0.85)'}
+        linkDirectionalParticleWidth={1.4}
+        linkDirectionalParticleSpeed={0.007}
 
         // Interaction
         enableNodeDrag={true}
