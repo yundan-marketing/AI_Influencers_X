@@ -1,18 +1,20 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import Graph3D from './components/Graph3D';
-import { INITIAL_DATA, LAST_UPDATED } from './constants';
+import { INITIAL_DATA } from './constants';
 import { GraphData, GraphNode } from './types';
 import { X as XIcon, ExternalLink, Building2, Link2, ChevronLeft, ChevronRight, Menu, Calendar, BadgeCheck, MapPin, Search, HelpCircle } from 'lucide-react';
 
 // Creator profile
 const CREATOR_PROFILE: GraphNode = {
-  id: 'jenny_the_bunny',
-  name: 'Jenny',
-  handle: 'Jenny_the_Bunny',
+  id: 'jamesjames518',
+  name: 'James',
+  handle: 'JamesJames518',
   group: 'founder',
   role: 'Creator of this page',
-  bio: 'Building cool things with AI. Creator of this AI influencer page. Let\'s be friends on X!',
-  joinedDate: 'Mar 2015 but never used until Feb 2026',
+  bio: 'Trader & Vibe Coder | X Growth - https://x-jumper.com | Social Trading - https://tradinggrader.com | Reddit Growth - https://redditmaster.com',
+  joinedDate: 'Joined July 2025',
+  location: 'United States',
+  following: 2680,
   verified: 'blue',
 };
 
@@ -200,9 +202,25 @@ export default function App() {
       <div
         className={`absolute top-0 left-0 h-full bg-[#05060A]/80 backdrop-blur-xl border-r border-white/10 z-30 transition-all duration-300 ease-in-out flex flex-col ${isMobile ? (isSidebarOpen ? 'w-72 translate-x-0' : 'w-72 -translate-x-72') : (isSidebarOpen ? 'w-80 translate-x-0' : 'w-80 -translate-x-80')}`}
       >
-        <div className="px-4 py-3 border-b border-white/10 bg-[#05060A]/50">
-            <h1 className="text-xl font-display font-bold text-white tracking-tight">Top AI Influencers on X</h1>
-            <p className="text-xs text-slate-400 mt-0.5">Data last updated: {LAST_UPDATED}</p>
+        <div className="px-4 py-3 border-b border-white/10 bg-[#05060A]/50 flex items-center">
+          <a
+            href="https://www.x-jumper.com/en-US"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-2"
+            aria-label="XJumper"
+          >
+            <img
+              src="https://www.x-jumper.com/logo.png"
+              alt="XJumper"
+              className="h-7 w-auto"
+              loading="eager"
+              draggable={false}
+            />
+            <span className="text-base font-display font-semibold tracking-tight text-white">
+              XJumper
+            </span>
+          </a>
         </div>
 
         {/* Search Bar */}
@@ -290,15 +308,10 @@ export default function App() {
             <div className="min-w-0 flex-1">
               <div className="flex items-baseline gap-1.5 truncate">
                 <span className={`text-sm font-semibold ${showCreatorCard ? 'text-white' : 'text-slate-200'}`}>
-                  Jenny
+                  James
                 </span>
                 <span className="text-xs text-slate-500 font-mono truncate">
-                  @Jenny_the_Bunny
-                </span>
-              </div>
-              <div className="flex items-center gap-2 mt-0.5">
-                <span className="text-xs text-slate-500 truncate">
-                  Creator of this page
+                  @JamesJames518
                 </span>
               </div>
             </div>
@@ -367,23 +380,28 @@ export default function App() {
                         <div className="mb-3">
                             <h2 className="text-xl font-bold text-white flex items-center gap-1.5">
                                 {CREATOR_PROFILE.name}
-                                <BadgeCheck className="w-5 h-5 text-blue-400 fill-blue-400/20" />
+                                {CREATOR_PROFILE.verified === 'gold' && <BadgeCheck className="w-5 h-5 text-amber-400 fill-amber-400/20" />}
+                                {CREATOR_PROFILE.verified === 'blue' && <BadgeCheck className="w-5 h-5 text-blue-400 fill-blue-400/20" />}
                             </h2>
                             <div className="text-slate-500 text-sm">@{CREATOR_PROFILE.handle}</div>
                         </div>
 
                         {/* Bio */}
-                        <p className="text-sm text-slate-200 leading-relaxed mb-3">
-                            {CREATOR_PROFILE.bio}
-                        </p>
+                        {CREATOR_PROFILE.bio && (
+                          <p className="text-sm text-slate-200 leading-relaxed mb-3">
+                              {CREATOR_PROFILE.bio}
+                          </p>
+                        )}
 
                         {/* Meta Info Row */}
-                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-slate-500 mb-4">
-                            <div className="flex items-center gap-1">
-                                <Calendar className="w-4 h-4" />
-                                <span>Joined {CREATOR_PROFILE.joinedDate}</span>
-                            </div>
-                        </div>
+                        {CREATOR_PROFILE.joinedDate && (
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-slate-500 mb-4">
+                              <div className="flex items-center gap-1">
+                                  <Calendar className="w-4 h-4" />
+                                  <span>Joined {CREATOR_PROFILE.joinedDate}</span>
+                              </div>
+                          </div>
+                        )}
 
                     </div>
                 </div>
@@ -601,7 +619,7 @@ export default function App() {
                 <p className="text-xs text-slate-400">
                   This methodology may not be perfect. Have ideas?{' '}
                   <a
-                    href="https://x.com/Jenny_the_Bunny"
+                    href="https://x.com/JamesJames518"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-indigo-400 hover:text-indigo-300"
