@@ -9,12 +9,12 @@ export default defineConfig(({ mode }) => {
     server: {
       host: "0.0.0.0",
       port: 3000,
-      allowedHosts: ["influencer.reddithunter.com"],
+      allowedHosts: ["influencer.reddithunter.com", "www.x-jumper.com", "x-jumper.com"],
     },
     preview: {
       host: "0.0.0.0",
       port: 4173,
-      allowedHosts: ["influencer.reddithunter.com"],
+      allowedHosts: ["influencer.reddithunter.com", "www.x-jumper.com", "x-jumper.com"],
     },
     plugins: [react()],
     define: {
